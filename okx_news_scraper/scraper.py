@@ -1,90 +1,151 @@
-import os
+import logging
 import re
 import time
-import logging
 from datetime import datetime
-from dateutil import parser as dateparser
+
 import requests
 from bs4 import BeautifulSoup
 
-logger = logging.getLogger(__name__)
-BASE_URL = "https://www.okx.com/help/category/announcements"
+from okx_news_scraper.utils import (
+    build_url,
+    extract_date,
+    write_json_file,
+    create_session,
+)
 
-def fetch_page(page: int = 1) -> BeautifulSoup:
-    resp = requests.get(f"{BASE_URL}?page={page}", timeout=10)
+logger = logging.getLogger(__name__)
+
+BASE_URL = "https://www.okx.com/"
+PATH_TO_PARSE = "/help/section/announcements-new-listings"
+
+
+def fetch_page(session: requests.Session, page: int = 1) -> BeautifulSoup:
+    """Fetch a page of OKX announcements."""
+    resp = session.get(
+        build_url(BASE_URL, PATH_TO_PARSE, page=page),
+        timeout=10,
+    )
     resp.raise_for_status()
     return BeautifulSoup(resp.text, "html.parser")
 
-def parse_announcement_list(soup: BeautifulSoup):
-    """Return list of (title, url, date_str)."""
+
+def parse_announcement_list(
+    soup: BeautifulSoup,
+) -> list[tuple[str, str, datetime]]:
+    """
+    Parse a page of OKX announcements.
+
+    Returns:
+        A list of (title, full_url, publication_datetime), sorted newest first.
+    """
     items = []
+
+    # 1) Select all <li> elements where class begins with 'index_articleItem__'
     for el in soup.select("li[class^='index_articleItem__']"):
+
+        # 2) Find the anchor with the href
         a = el.find("a", href=True)
-        date_el = el.find("span", class_="date")
-        if not a or not date_el:
+        if not a:
             continue
-        title = a.get_text(strip=True)
-        link = "https://www.okx.com" + a["href"]
-        date_str = date_el.get_text(strip=True)
+
+        # 3) Within the <a>, find the title DIV (class 'index_articleTitle__')
+        title_el = a.find("div", class_=re.compile(r"index_articleTitle__"))
+
+        # 4) And find the date span (data‑testid="DateDisplay")
+        date_el = a.find("span", {"data-testid": "DateDisplay"})
+        if not title_el or not date_el:
+            continue
+
+        # 5) Extract and clean the text
+        title = title_el.get_text(strip=True)
+
+        # 6) Prepend domain to the href
+        link = build_url("https://www.okx.com/", a["href"])
+
+        # 7) Extract the date string
+        try:
+            date_str = extract_date(date_el.get_text(strip=True))
+        except Exception as e:
+            logger.warning(
+                f"Failed to parse date '{date_el.get_text(strip=True)}': {e}."
+                f" Skipping this announcement."
+            )
+            continue
+
+        # Collect the tuple
         items.append((title, link, date_str))
-    return items
 
-def fetch_detail(link: str):
-    resp = requests.get(link, timeout=10)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    body_el = soup.select_one("div.article-content")
-    return body_el.get_text("\n", strip=True) if body_el else ""
+    # Sort by date descending
+    return sorted(items, key=lambda x: x[2], reverse=True)
 
-def sanitize_filename(s: str) -> str:
-    # slugify-ish: lowercase, replace non-alnum with underscore
-    return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
+
+def fetch_detail(session: requests.Session, link: str) -> str:
+    """Fetch the detail of an announcement."""
+    try:
+        resp = session.get(link, timeout=10)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        body_el = soup.select_one('div[class*="index_richTextContent__"]')
+    except Exception as e:
+        logger.error(f"Failed to fetch detail from {link}: {e}")
+        return ""
+    return body_el.get_text(separator="\n", strip=True) if body_el else ""
+
 
 def scrape(start_date: datetime, end_date: datetime, out_folder: str):
-    os.makedirs(out_folder, exist_ok=True)
+    """
+    Scrape OKX announcements between two dates and save them as JSON files.
+    Args:
+        start_date (datetime): Start date (inclusive).
+        end_date (datetime): End date (inclusive).
+        out_folder (str): Output folder for JSON files.
+    """
+    session = create_session()
+    data = []
     page = 1
     done = False
 
     while not done:
+        logger.info("Processing page %d ...", page)
         try:
-            soup = fetch_page(page)
+            soup = fetch_page(session=session, page=page)
         except Exception as e:
             logger.error(f"Failed to fetch page {page}: {e}")
             break
 
+        # Parse raw list of (title, link, date_str)
         ann = parse_announcement_list(soup)
         if not ann:
             break
 
-        for title, link, date_str in ann:
-            try:
-                pub_date = dateparser.parse(date_str)
-            except Exception:
-                logger.warning(f"Skipping invalid date {date_str}")
-                continue
+        # Process in descending order
+        for title, link, pub_date in ann:
+            # 1) If the date is before the start date, we're done
+            # 2) If the date is after the end date, skip
+            # 3) Otherwise, fetch the detail and save it
 
+            # Check if we are within the date range
             if pub_date < start_date:
                 done = True
                 break
             if pub_date > end_date:
                 continue
 
-            body = fetch_detail(link)
-            data = {
+            # Fetch the detail
+            body = fetch_detail(session=session, link=link)
+            data.append({
                 "title": title,
                 "url": link,
                 "date": pub_date.isoformat(),
                 "body": body,
-            }
-            fname = f"{pub_date.date()}_{sanitize_filename(title)}.json"
-            path = os.path.join(out_folder, fname)
-            with open(path, "w", encoding="utf-8") as f:
-                import json
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"Wrote {path}")
-            # be polite
+            })
+
+            # To be polite
             time.sleep(0.5)
 
         page += 1
         time.sleep(1)
 
+    # Write the data to JSON files
+    filename = f"okx_announcements_{start_date.date()}_{end_date.date()}.json"
+    write_json_file(data, filename, out_folder)

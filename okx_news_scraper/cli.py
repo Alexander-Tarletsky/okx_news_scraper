@@ -1,15 +1,19 @@
-import sys
 import argparse
 import logging
+import sys
 from datetime import datetime
+
 from okx_news_scraper.scraper import scrape
 
-def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        stream=sys.stderr
-    )
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stderr,
+)
+logger = logging.getLogger("OKX News Scraper")
+
+
+def main() -> None:
 
     p = argparse.ArgumentParser(
         description="Scrape OKX announcements between dates and save as JSON."
@@ -32,18 +36,21 @@ def main():
         start = datetime.strptime(args.start, "%Y-%m-%d")
         end = datetime.strptime(args.end, "%Y-%m-%d")
     except ValueError as exc:
-        logging.error(f"Invalid date format: {exc}")
+        logger.error(f"Invalid date format: {exc}")
         sys.exit(1)
 
     if start > end:
-        logging.error("START date must be <= END date.")
+        logger.error("START date must be <= END date.")
         sys.exit(1)
 
     try:
         scrape(start, end, args.folder)
     except Exception as exc:
-        logging.error(f"Unexpected error: {exc}", exc_info=True)
+        logger.error(f"Unexpected error: {exc}", exc_info=True)
         sys.exit(2)
 
+
 if __name__ == "__main__":
+    logger.info("Starting OKX news scraper...")
     main()
+    logger.info("OKX news scraper finished.")
