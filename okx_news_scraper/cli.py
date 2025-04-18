@@ -44,13 +44,15 @@ def main() -> None:
         sys.exit(1)
 
     try:
+        logger.info("Starting OKX news scraper...")
         scrape(start, end, args.folder)
     except Exception as exc:
         logger.error(f"Unexpected error: {exc}", exc_info=True)
         sys.exit(2)
+    else:
+        logger.info("Scraping completed successfully.")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
-    logger.info("Starting OKX news scraper...")
     main()
-    logger.info("OKX news scraper finished.")
